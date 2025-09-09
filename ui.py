@@ -6,7 +6,7 @@ from datetime import datetime
 
 load_dotenv()
 
-st.title("Text-to-SQL Proof of Concept")
+st.title("Text-to-SQL-Output")
 st.markdown("Ask questions about company finance and cargo operations.")
 
 # Initialize session state for chat history
@@ -62,3 +62,4 @@ if question:
             st.session_state.history.append({'role': 'assistant', 'content': error_msg, 'timestamp': datetime.now()})
             with st.chat_message('assistant'):
                 st.error(error_msg)
+
