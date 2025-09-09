@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+langchain
+google-generativeai
+langchain-google-genai
+pandas
+python-dotenv
+streamlit
+requests
