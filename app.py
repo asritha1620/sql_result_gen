@@ -2,20 +2,33 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_community.utilities import SQLDatabase
-from langchain_community.agent_toolkits import SQLDatabaseToolkit
+from langchain_community.agent_toolkits import create_sql_agent, SQLDatabaseToolkit
 from langchain.agents import ZeroShotAgent, AgentExecutor
 from langchain_core.messages import HumanMessage
+from langchain.chains import LLMChain
+from langchain.prompts import PromptTemplate
 from dotenv import load_dotenv
 import os
 import uvicorn
 import logging
 import asyncio
+import hashlib
+from functools import lru_cache
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 load_dotenv()
 
-app = FastAPI(title="Text-to-SQL PoC", description="A proof-of-concept Text-to-SQL system for business data.")
+# Caching for performance and API optimization
+relevance_cache = {}  # Cache relevance check responses
+response_cache = {}   # Cache full responses for identical questions
+
+@lru_cache(maxsize=1)
+def get_cached_schema():
+    """Cache the database schema to avoid repeated calls."""
+    return db.get_table_info()
+
+app = FastAPI(title="Text-to-SQL PoC", description="A proof-of-concept Text-to-SQL system for port financials and operations.")
 
 class QueryRequest(BaseModel):
     question: str
@@ -34,93 +47,71 @@ if not api_key:
 db = SQLDatabase.from_uri("sqlite:///business_data.db")
 llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", google_api_key=api_key, temperature=0)
 
-# Create toolkit and filter tools to reduce API calls
+# Create toolkit (no filtering needed for create_sql_agent)
 toolkit = SQLDatabaseToolkit(db=db, llm=llm)
-tools = toolkit.get_tools()
-# Remove query_checker and schema tools to reduce API calls
-tools = [t for t in tools if t.name not in ['sql_db_query_checker', 'sql_db_schema']]
 
-tool_names = [t.name for t in tools]
-format_instructions = f"""Use the following format:
-
-Question: the input question you must answer
-Thought: you should always think about what to do
-Action: the action to take, should be one of {tool_names}
-Action Input: the input to the action
-Observation: the result of the action
-... (this Thought/Action/Action Input/Observation can repeat N times)
-Thought: I now know the final answer
-Final Answer: the final answer to the original input question"""
-
-# Create custom agent with schema in prefix to avoid schema calls
-prefix = f"You are an agent that can query a SQL database. The database has the following tables:\n{db.get_table_info()}\n\nImportant instructions:\n- When using the sql_db_query tool, provide the SQL query as plain text without any markdown formatting like ```sql or code blocks.\n- Always provide the final answer in natural language, explaining the result based on the data retrieved. Do not output raw numbers or data without context.\n\nExamples for complex queries:\n- Aggregations: For 'What is the average revenue in 2023?', use SELECT AVG(revenue) FROM quarterly_financial WHERE year = 2023;\n- Joins: For 'Compare revenue and cargo volume in Q1 2023', use SELECT q.revenue, o.volume FROM quarterly_financial q INNER JOIN operational_cargo o ON q.year = o.year AND q.quarter = o.quarter WHERE q.year = 2023 AND q.quarter = 'Q1';\n- Subqueries: For 'Ports with cargo above average in 2023', use SELECT port, volume FROM operational_cargo WHERE year = 2023 AND volume > (SELECT AVG(volume) FROM operational_cargo WHERE year = 2023);\n- Cross-domain: For 'Total revenue per cargo volume in 2023', combine tables using JOIN and GROUP BY.\n\n{format_instructions}\n\n"
-suffix = "Begin!\n\nQuestion: {input}\nThought: {agent_scratchpad}"
-
-agent = ZeroShotAgent.from_llm_and_tools(
+# Create the SQL agent with a simple system message
+agent_executor = create_sql_agent(
     llm=llm,
-    tools=tools,
-    prefix=prefix,
-    suffix=suffix
-)
-
-# Create agent executor
-agent_executor = AgentExecutor.from_agent_and_tools(
-    agent=agent,
-    tools=tools,
+    toolkit=toolkit,
     verbose=True,
-    handle_parsing_errors=True,
-    max_iterations=5,
-    return_intermediate_steps=True
+    agent_type="openai-tools",  # Or "zero-shot-react-description" if preferred
+    prefix=f"You are an AI assistant that answers questions about port financials (e.g., balance sheets, P&L, ROCE) and operations (e.g., cargo volumes, containers, RORO). The database schema is:\n{get_cached_schema()}\n\nAlways generate SQL queries based on this schema. Provide detailed, explanatory responses, including the SQL query used and a summary of the data. If the question is not related, politely decline.\n\nExamples:\n- For EBIT at a port: SELECT value FROM roce_internal WHERE port = 'APSEZ' AND line_item = 'EBIT' AND period = '2024-25';\n- For cargo volume: SELECT SUM(value) FROM volumes WHERE port = 'Mundra' AND period = '2024-25';\n- For revenue: SELECT value FROM consolidated_pnl WHERE \"Line Item\" = 'Revenue from Operation' AND \"Period\" = '2024-25';"
 )
 
 logging.info("Application started successfully with optimized SQL agent.")
 
 @app.post("/query")
-async def query(request: QueryRequest):
-    question = request.question
-    logging.info(f"Received question: {question}")
+async def query_database(request: QueryRequest):
+    question = request.question.strip()
     
-    if not question.strip():
-        logging.warning("Empty question received")
-        raise HTTPException(status_code=400, detail="Question cannot be empty")
+    # Check response cache first
+    question_hash = hashlib.md5(question.encode()).hexdigest()
+    if question_hash in response_cache:
+        logging.info("Returning cached response for question.")
+        return {"response": response_cache[question_hash]}
     
-    # Check for greetings
-    words = question.lower().split()
-    if len(words) <= 3:
-        greetings = ['hi', 'hello', 'hey', 'good', 'morning', 'afternoon', 'evening', 'thanks', 'thank']
-        if any(word in greetings for word in words):
-            logging.info("Detected greeting")
-            return {"response": "Hello! How can I help you with questions about company finance or cargo operations?"}
+    # Handle greetings
+    greetings = ['hi', 'hello', 'hey', 'greetings', 'good morning', 'good afternoon', 'good evening']
+    if question.lower() in greetings or any(greet in question.lower() for greet in greetings):
+        response = "Hello! I'm here to help with questions about port financials and operations. What would you like to know?"
+        response_cache[question_hash] = response
+        return {"response": response}
     
-    # Check if question is relevant using LLM
+    # Simple relevance check using LLM (with caching and error handling)
+    relevance_prompt = f"Is this question about port financials or operations? Answer 'yes' or 'no': {question}"
+    relevance_hash = hashlib.md5(relevance_prompt.encode()).hexdigest()
+    
+    if relevance_hash in relevance_cache:
+        relevance_response = relevance_cache[relevance_hash]
+        logging.info("Using cached relevance check.")
+    else:
+        try:
+            relevance_response = llm.invoke([HumanMessage(content=relevance_prompt)]).content.lower()
+            relevance_cache[relevance_hash] = relevance_response
+        except Exception as e:
+            error_str = str(e)
+            if "ResourceExhausted" in error_str or "429" in error_str or "quota" in error_str.lower():
+                logging.warning("Gemini API quota exceeded. Skipping relevance check and proceeding with query.")
+                relevance_response = "yes"  # Assume relevant if quota exceeded
+            else:
+                logging.warning(f"Error in relevance check: {e}")
+                relevance_response = "yes"  # Assume relevant if check fails
+    
+    if "no" in relevance_response:
+        response = "I'm sorry, I can only answer questions about port financials and operations."
+        response_cache[question_hash] = response
+        return {"response": response}
+    
     try:
-        response = await asyncio.to_thread(llm.invoke, [HumanMessage(content=f"""Determine if this question is about company finance or cargo operations.
-Answer only 'yes' or 'no':
-
-Question: {question}
-Answer:""")])
-        answer = response.content.strip().lower()
-        is_relevant = answer == 'yes'
-    except Exception as e:
-        logging.warning(f"Error in relevance check: {e}")
-        is_relevant = True  # Assume relevant
-    
-    if not is_relevant:
-        logging.info("Question determined to be outside scope by LLM")
-        return {"response": "I'm sorry, I can only answer questions about company finance and cargo operations."}
-    
-    try:
-        logging.info("Running optimized SQL agent...")
-        result = await asyncio.to_thread(agent_executor, question)
-        logging.info("Agent executed successfully")
+        # Run the agent
+        result = agent_executor.invoke({"input": question})
+        # Extract the final answer
+        final_answer = result.get('output', str(result)) if isinstance(result, dict) else str(result)
         
-        final_answer = result.get('output', str(result))
-        intermediate_steps = result.get('intermediate_steps', [])
-        
-        logging.info(f"Raw agent output: {final_answer}")
-        
-        # Extract SQL query from intermediate steps (for logging only, not returned)
+        # Extract SQL query from intermediate steps
         sql_query = "Generated by SQL Agent"
+        intermediate_steps = result.get('intermediate_steps', [])
         for step in intermediate_steps:
             if isinstance(step, tuple) and len(step) == 2:
                 action, observation = step
@@ -136,17 +127,29 @@ Answer:""")])
         if final_answer and final_answer.replace(',', '').replace('.', '').replace(' ', '').isdigit():
             final_answer = f"The result is {final_answer}."
         
+        # Include SQL query in the response for transparency
+        if sql_query != "Generated by SQL Agent":
+            final_answer += f"\n\nSQL Query Used: {sql_query}"
+        
         logging.info(f"Generated SQL: {sql_query}")
         logging.info(f"Final Answer: {final_answer}")
         
+        # Cache the response
+        response_cache[question_hash] = final_answer
+        
         return {"response": final_answer}
     except Exception as e:
-        error_msg = str(e)
-        if "insufficient_quota" in error_msg or "RateLimitError" in error_msg or "ResourceExhausted" in error_msg or "429" in error_msg:
-            logging.error("Gemini API quota exceeded. Please check your Google Cloud billing or wait for the rate limit to reset.")
-            raise HTTPException(status_code=429, detail="Gemini API quota exceeded. Please check your Google Cloud billing or wait for the rate limit to reset.")
-        logging.error(f"Exception occurred: {error_msg}", exc_info=True)
-        raise HTTPException(status_code=500, detail="I'm sorry, I can only answer questions about company finance and cargo operations.")
+        error_str = str(e)
+        if "ResourceExhausted" in error_str or "429" in error_str or "quota" in error_str.lower():
+            logging.error("Gemini API quota exceeded during query processing.")
+            response = "Sorry, the AI service quota has been exceeded. Please check your Google Cloud billing or wait for the quota to reset (typically daily for free tier)."
+        else:
+            logging.error(f"Exception occurred: {error_str}", exc_info=True)
+            response = "I'm sorry, I encountered an error processing your question. Please try rephrasing."
+        
+        # Cache error responses too
+        response_cache[question_hash] = response
+        return {"response": response}
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
