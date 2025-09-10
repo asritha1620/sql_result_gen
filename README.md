@@ -1,11 +1,17 @@
 # Text-to-SQL Proof of Concept
 
 ## Overview
-This project is a proof-of-concept (PoC) Text-to-SQL system designed to answer natural language questions about business data. It uses a FastAPI backend for the API and a Streamlit frontend for the user interface. The system interprets user questions, generates appropriate SQL queries, executes them against a SQLite database, and returns concise natural language responses.
+This project is a proof-of-concept (PoC) Text-to-SQL system designed to answer natural language questions about port financials and operations. It uses a FastAPI backend for the API and a Streamlit frontend for the user interface. The system interprets user questions, generates appropriate SQL queries, executes them against a SQLite database, and returns concise natural language responses.
 
 The data includes:
-- **Financial Data**: Quarterly financial statements (revenue, net income, assets, liabilities) and annual performance metrics.
-- **Operational Data**: Cargo volumes handled at various international ports over time.
+- **Balance Sheet**: Financial position data including assets, liabilities, etc.
+- **Cash Flow Statement**: Cash inflows and outflows.
+- **Consolidated P&L**: Profit and loss statements.
+- **Quarterly P&L**: Detailed quarterly financials.
+- **ROCE External/Internal**: Return on Capital Employed metrics.
+- **Volumes**: Cargo volumes at various ports.
+- **Containers**: Container handling data.
+- **RORO**: Roll-on/Roll-off vehicle data.
 
 ## Setup Instructions
 1. **Clone or Download the Repository**: Ensure all files are in the project directory.
@@ -57,24 +63,68 @@ Install all via `pip install -r requirements.txt`.
 ## Database Schema
 The SQLite database `business_data.db` contains the following tables:
 
-- **quarterly_financial**:
-  - `year` (INTEGER): The year of the financial data.
-  - `quarter` (TEXT): The quarter (e.g., Q1, Q2).
-  - `revenue` (REAL): Revenue for the quarter.
-  - `net_income` (REAL): Net income for the quarter.
-  - `assets` (REAL): Total assets.
-  - `liabilities` (REAL): Total liabilities.
+- **balance_sheet**:
+  - `line_item` (VARCHAR(255)): The financial line item.
+  - `category` (VARCHAR(50)): Category (e.g., ASSETS).
+  - `subcategory` (VARCHAR(100)): Subcategory.
+  - `subsubcategory` (VARCHAR(100)): Sub-subcategory.
+  - `period` (VARCHAR(20)): Period (e.g., 2024-25).
+  - `value` (REAL): The value.
 
-- **annual_financial**:
-  - `year` (INTEGER): The year.
-  - `metric` (TEXT): The metric name (e.g., total_revenue).
-  - `value` (REAL): The value of the metric.
+- **cash_flow_statement**:
+  - `item` (VARCHAR(255)): The cash flow item.
+  - `category` (VARCHAR(100)): Category.
+  - `period` (VARCHAR(20)): Period.
+  - `value` (REAL): The value.
 
-- **operational_cargo**:
-  - `year` (INTEGER): The year.
-  - `quarter` (TEXT): The quarter.
-  - `port` (TEXT): The port name.
-  - `volume` (REAL): Cargo volume handled.
+- **roce_external**:
+  - `particular` (VARCHAR(100)): The particular metric.
+  - `period` (VARCHAR(20)): Period.
+  - `value` (REAL): The value.
+
+- **roce_internal**:
+  - `category` (VARCHAR(50)): Category.
+  - `port` (VARCHAR(50)): Port name.
+  - `line_item` (VARCHAR(100)): Line item.
+  - `period` (VARCHAR(20)): Period.
+  - `value` (REAL): The value.
+
+- **quarterly_pnl**:
+  - `item` (VARCHAR(255)): The item.
+  - `category` (VARCHAR(50)): Category.
+  - `period` (VARCHAR(20)): Period.
+  - `value` (REAL): The value.
+  - `period_type` (VARCHAR(20)): Period type.
+
+- **consolidated_pnl**:
+  - `line_item` (VARCHAR(100)): Line item.
+  - `period` (VARCHAR(20)): Period.
+  - `value` (REAL): The value.
+
+- **volumes**:
+  - `port` (VARCHAR(50)): Port name.
+  - `state` (VARCHAR(50)): State.
+  - `commodity` (VARCHAR(50)): Commodity.
+  - `entity` (VARCHAR(50)): Entity.
+  - `type` (VARCHAR(20)): Type.
+  - `period` (VARCHAR(20)): Period.
+  - `value` (REAL): The volume.
+
+- **containers**:
+  - `port` (VARCHAR(50)): Port name.
+  - `entity` (VARCHAR(50)): Entity.
+  - `type` (VARCHAR(20)): Type.
+  - `period` (VARCHAR(20)): Period.
+  - `value` (REAL): The value.
+
+- **roro**:
+  - `port` (VARCHAR(50)): Port name.
+  - `type` (VARCHAR(20)): Type.
+  - `period` (VARCHAR(20)): Period.
+  - `value` (REAL): The value.
+  - `number_of_cars` (INTEGER): Number of cars.
+
+Indexes are created on key join columns (e.g., `period`, `port`) for improved query performance.
 
 ## Design Choices
 - **AI/ML Approach**: Used LangChain's `create_sql_agent` with Google's Gemini 1.5 Flash for natural language to SQL conversion. The agent uses a zero-shot react description approach for generating and executing SQL queries against the database. It returns intermediate steps, allowing us to extract the generated SQL and the final natural language response.
@@ -92,6 +142,6 @@ The SQLite database `business_data.db` contains the following tables:
 - Assumes the FastAPI server is running on localhost:8000 for the Streamlit UI to work.
 
 ## Usage
-- Enter a natural language question in the Streamlit UI, such as "What was the total revenue in 2023?" or "How much cargo was handled at New York in Q1 2024?"
+- Enter a natural language question in the Streamlit UI, such as "What is the EBIT for APSEZ in 2024-25?" or "How much cargo volume was handled at Mundra in 2024-25?"
 - The system will provide a natural language response based on the data.
 - If the question is outside the scope, it will respond accordingly.
