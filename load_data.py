@@ -6,9 +6,9 @@ conn = sqlite3.connect('business_data.db')
 cursor = conn.cursor()
 
 # Drop old tables if exist
-cursor.execute('DROP TABLE IF EXISTS quarterly_financial')
-cursor.execute('DROP TABLE IF EXISTS annual_financial')
-cursor.execute('DROP TABLE IF EXISTS operational_cargo')
+# cursor.execute('DROP TABLE IF EXISTS quarterly_financial')
+# cursor.execute('DROP TABLE IF EXISTS annual_financial')
+# cursor.execute('DROP TABLE IF EXISTS operational_cargo')
 
 # Create new tables based on CSV structures
 cursor.execute('''
@@ -137,3 +137,4 @@ conn.commit()
 conn.close()
 
 print("Database updated with new tables, data loaded, and indexes created successfully.")
+
